@@ -1,11 +1,11 @@
-use std::ops::Range;
+use std::ops::RangeInclusive;
 
 #[derive(Debug, PartialEq)]
 pub enum Token {
-    Literal(Vec<char>),
+    Literal(String),
     AndGroup(Vec<Token>),
     OrGroup(Vec<Token>),
-    Quantifier(Range<u32>),
+    Quantifier(RangeInclusive<u32>, Option<Box<Token>>),
     CharacterClass(CharacterClassMode, String),
     Or,
 }
@@ -20,71 +20,29 @@ pub enum CharacterClassMode {
 pub enum ParseError {
     Skip,
     RangeError,
-    FormatError,
+    SyntaxError,
     UnicodeRangeError,
+    QuantifierOutOfLimit,
+    InvalidRange,
+}
+
+fn quantifier_max_value() -> u32 {
+    100u32
 }
 
 #[test]
-fn test_parse() {
+fn test_root() {
     assert_eq!(Ok((Token::OrGroup(vec![]), "")), root(""));
 
     assert_eq!(
         Ok((
-            Token::AndGroup(vec![
-                Token::Literal(vec!['h']),
-                Token::Literal(vec!['o']),
-                Token::Literal(vec!['g']),
-                Token::Literal(vec!['e']),
-            ]),
-            ""
-        )),
-        root("hoge")
-    );
-
-    assert_eq!(
-        Ok((
             Token::OrGroup(vec![
-                Token::AndGroup(vec![Token::Literal(vec!['A']),]),
-                Token::AndGroup(vec![Token::Literal(vec!['B']),])
+                Token::AndGroup(vec![Token::Literal("A".to_string())]),
+                Token::AndGroup(vec![Token::Literal("B".to_string())])
             ]),
             ""
         )),
         root("A|B")
-    );
-
-    assert_eq!(
-        Ok((
-            Token::AndGroup(vec![Token::Literal(vec!['A']), generate_quantifier(10, 20)]),
-            ""
-        )),
-        root("A{10,20}")
-    );
-
-    assert_eq!(
-        Ok((
-            Token::AndGroup(vec![Token::Literal(vec!['A']), generate_quantifier(0, 20)]),
-            ""
-        )),
-        root("A{,20}")
-    );
-
-    assert_eq!(
-        Ok((
-            Token::AndGroup(vec![
-                Token::Literal(vec!['A']),
-                generate_quantifier(10, u32::MAX)
-            ]),
-            ""
-        )),
-        root("A{10,}")
-    );
-
-    assert_eq!(
-        Ok((
-            Token::AndGroup(vec![Token::Literal(vec!['A']), generate_quantifier(10, 10)]),
-            ""
-        )),
-        root("A{10}")
     );
 
     assert_eq!(
@@ -99,16 +57,15 @@ fn test_parse() {
     );
 }
 
-fn generate_quantifier(start: u32, end: u32) -> Token {
-    Token::Quantifier(Range { start, end })
-}
-
 fn quantifier<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
     let mut target = input;
 
     if !target.starts_with("{") {
         return Err(ParseError::Skip);
+    } else if target.starts_with("{}") {
+        return Err(ParseError::SyntaxError);
     }
+
     target = target
         .get("{".len()..target.len())
         .ok_or(ParseError::RangeError)?;
@@ -122,7 +79,7 @@ fn quantifier<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
                 .ok_or(ParseError::RangeError)?
                 .to_string()
                 .parse::<u32>()
-                .map_err(|_| ParseError::FormatError)?;
+                .map_err(|_| ParseError::SyntaxError)?;
             target = target.get(i..).ok_or(ParseError::RangeError)?;
             num
         }
@@ -139,33 +96,70 @@ fn quantifier<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
 
         if let Some(i) = target.find(|c: char| !c.is_digit(10)) {
             if i == 0 {
-                u32::MAX
+                quantifier_max_value()
             } else {
                 let num = target
                     .get(0..i)
                     .ok_or(ParseError::RangeError)?
                     .to_string()
                     .parse::<u32>()
-                    .map_err(|_| ParseError::FormatError)?;
+                    .map_err(|_| ParseError::SyntaxError)?;
                 target = target.get(i..).ok_or(ParseError::RangeError)?;
                 num
             }
         } else {
-            u32::MAX
+            quantifier_max_value()
         }
     } else {
-        return Err(ParseError::FormatError);
+        return Err(ParseError::SyntaxError);
     };
 
+    if quantifier_max_value() < start || quantifier_max_value() < end {
+        return Err(ParseError::QuantifierOutOfLimit);
+    }
+    if end < start {
+        return Err(ParseError::InvalidRange);
+    }
+
     if !target.starts_with("}") {
-        return Err(ParseError::FormatError);
+        return Err(ParseError::SyntaxError);
     }
 
     target = target
         .get("}".len()..target.len())
         .ok_or(ParseError::RangeError)?;
 
-    return Ok((generate_quantifier(start, end), target));
+    return Ok((Token::Quantifier(start..=end, None), target));
+}
+
+#[test]
+fn test_quantifier() {
+    assert_eq!(
+        Ok((Token::Quantifier(10..=20, None), "")),
+        quantifier("{10,20}")
+    );
+    assert_eq!(
+        Ok((Token::Quantifier(10..=quantifier_max_value(), None), "")),
+        quantifier("{10,}")
+    );
+    assert_eq!(
+        Ok((Token::Quantifier(0..=20, None), "")),
+        quantifier("{,20}")
+    );
+    assert_eq!(
+        Ok((Token::Quantifier(10..=10, None), "")),
+        quantifier("{10}")
+    );
+
+    assert_eq!(Err(ParseError::SyntaxError), quantifier("{}"));
+    assert_eq!(Err(ParseError::SyntaxError), quantifier("{10,20]"));
+    assert_eq!(Err(ParseError::SyntaxError), quantifier("{abc,20}"));
+    assert_eq!(Err(ParseError::SyntaxError), quantifier("{10,abc}"));
+    assert_eq!(Err(ParseError::InvalidRange), quantifier("{20,10}"));
+    assert_eq!(
+        Err(ParseError::QuantifierOutOfLimit),
+        quantifier("{10,1000}")
+    );
 }
 
 fn character_class<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
@@ -224,7 +218,7 @@ fn character_class<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
                 }
 
                 if is_range {
-                    return Err(ParseError::FormatError);
+                    return Err(ParseError::SyntaxError);
                 }
                 break;
             }
@@ -236,12 +230,15 @@ fn character_class<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
                     }
                     prev = *c;
                     continue;
+                } else if is_escape {
+                    is_escape = false;
+                    chars.push('\\');
                 }
                 chars.push(*c);
                 prev = *c;
             }
             _ => {
-                return Err(ParseError::FormatError);
+                return Err(ParseError::SyntaxError);
             }
         }
     }
@@ -254,6 +251,41 @@ fn character_class<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
         )),
         None => Ok((token, target.get(0..0).ok_or(ParseError::RangeError)?)),
     };
+}
+
+#[test]
+fn test_character_class() {
+    assert_eq!(
+        Ok((
+            Token::CharacterClass(CharacterClassMode::Include, "abc".to_string()),
+            ""
+        )),
+        character_class("[a-c]")
+    );
+
+    assert_eq!(
+        Ok((
+            Token::CharacterClass(CharacterClassMode::Exclude, "abc".to_string()),
+            ""
+        )),
+        character_class("[^a-c]")
+    );
+
+    assert_eq!(
+        Ok((
+            Token::CharacterClass(CharacterClassMode::Include, "]".to_string()),
+            ""
+        )),
+        character_class("[\\]]")
+    );
+
+    assert_eq!(
+        Ok((
+            Token::CharacterClass(CharacterClassMode::Include, "\\ ".to_string()),
+            ""
+        )),
+        character_class("[\\ ]")
+    );
 }
 
 fn alt<'a>(
@@ -278,11 +310,20 @@ fn asterisk<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
     }
 
     Ok((
-        generate_quantifier(0, u32::MAX),
+        Token::Quantifier(0..=quantifier_max_value(), None),
         input
             .get(word.len()..input.len())
             .ok_or(ParseError::RangeError)?,
     ))
+}
+
+#[test]
+fn test_asterisk() {
+    assert_eq!(
+        Ok((Token::Quantifier(0..=quantifier_max_value(), None), "")),
+        asterisk("*")
+    );
+    assert_eq!(Err(ParseError::Skip), asterisk("_"));
 }
 
 fn plus<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
@@ -292,11 +333,20 @@ fn plus<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
     }
 
     Ok((
-        generate_quantifier(1, u32::MAX),
+        Token::Quantifier(1..=quantifier_max_value(), None),
         input
             .get(word.len()..input.len())
             .ok_or(ParseError::RangeError)?,
     ))
+}
+
+#[test]
+fn test_plus() {
+    assert_eq!(
+        Ok((Token::Quantifier(1..=quantifier_max_value(), None), "")),
+        plus("+")
+    );
+    assert_eq!(Err(ParseError::Skip), plus("_"));
 }
 
 fn question<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
@@ -306,11 +356,17 @@ fn question<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
     }
 
     Ok((
-        generate_quantifier(0, 1),
+        Token::Quantifier(0..=1, None),
         input
             .get(word.len()..input.len())
             .ok_or(ParseError::RangeError)?,
     ))
+}
+
+#[test]
+fn test_question() {
+    assert_eq!(Ok((Token::Quantifier(0..=1, None), "")), question("?"));
+    assert_eq!(Err(ParseError::Skip), question("_"));
 }
 
 fn vertical_line<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
@@ -325,6 +381,12 @@ fn vertical_line<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
             .get(word.len()..input.len())
             .ok_or(ParseError::RangeError)?,
     ))
+}
+
+#[test]
+fn test_vertical_line() {
+    assert_eq!(Ok((Token::Or, "")), vertical_line("|"));
+    assert_eq!(Err(ParseError::Skip), vertical_line("_"));
 }
 
 fn metacharacter<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
@@ -347,16 +409,22 @@ fn literal<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
     return match &it.next() {
         Some((0, c)) => match &it.next() {
             Some((i, _)) => Ok((
-                Token::Literal(vec![*c]),
+                Token::Literal(c.to_string()),
                 input.get(*i..input.len()).ok_or(ParseError::RangeError)?,
             )),
             None => Ok((
-                Token::Literal(vec![*c]),
+                Token::Literal(c.to_string()),
                 input.get(0..0).ok_or(ParseError::RangeError)?,
             )),
         },
         _ => Err(ParseError::Skip),
     };
+}
+
+#[test]
+fn test_literal() {
+    assert_eq!(Ok((Token::Literal("a".to_string()), "")), literal("a"));
+    assert_eq!(Ok((Token::Literal("a".to_string()), "bc")), literal("abc"));
 }
 
 pub fn root<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
@@ -365,33 +433,11 @@ pub fn root<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
 
     loop {
         if target.starts_with(")") {
-            return Err(ParseError::FormatError);
+            return Err(ParseError::SyntaxError);
         }
 
         if target.len() == 0 {
-            let mut section: Vec<Token> = vec![];
-            let mut ts: Vec<Token> = vec![];
-            for t in tokens {
-                if t == Token::Or {
-                    ts.push(Token::AndGroup(section));
-                    section = vec![];
-                } else {
-                    section.push(t);
-                }
-            }
-            if section.len() != 0 {
-                if ts.len() == 0 {
-                    return Ok((
-                        Token::AndGroup(section),
-                        target.get(0..0).ok_or(ParseError::RangeError)?,
-                    ));
-                }
-                ts.push(Token::AndGroup(section));
-            }
-            return Ok((
-                Token::OrGroup(ts),
-                target.get(0..0).ok_or(ParseError::RangeError)?,
-            ));
+            return create_group_token(target, tokens);
         }
 
         match alt(
@@ -419,7 +465,7 @@ pub fn root<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
             }
         }
 
-        return Err(ParseError::FormatError);
+        return Err(ParseError::SyntaxError);
     }
 }
 
@@ -439,27 +485,11 @@ fn group<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
                 .get(")".len()..target.len())
                 .ok_or(ParseError::RangeError)?;
 
-            let mut section: Vec<Token> = vec![];
-            let mut ts: Vec<Token> = vec![];
-            for t in tokens {
-                if t == Token::Or {
-                    ts.push(Token::AndGroup(section));
-                    section = vec![];
-                } else {
-                    section.push(t);
-                }
-            }
-            if section.len() != 0 {
-                if ts.len() == 0 {
-                    return Ok((Token::AndGroup(section), target));
-                }
-                ts.push(Token::AndGroup(section));
-            }
-            return Ok((Token::OrGroup(ts), target));
+            return create_group_token(target, tokens);
         }
 
         if target.len() == 0 {
-            return Err(ParseError::FormatError);
+            return Err(ParseError::SyntaxError);
         }
 
         match alt(
@@ -487,6 +517,132 @@ fn group<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
             }
         }
 
-        return Err(ParseError::FormatError);
+        return Err(ParseError::SyntaxError);
     }
+}
+
+fn create_group_token<'a>(
+    input: &'a str,
+    mut tokens: Vec<Token>,
+) -> Result<(Token, &'a str), ParseError> {
+    let mut section: Vec<Token> = vec![];
+    let mut ts: Vec<Token> = vec![];
+
+    tokens.reverse();
+    let mut it = tokens.into_iter();
+    loop {
+        match it.next() {
+            Some(Token::Quantifier(range, None)) => match it.next() {
+                Some(Token::Quantifier(_, _)) => {
+                    return Err(ParseError::SyntaxError);
+                }
+                Some(t) => {
+                    ts.push(Token::Quantifier(range, Some(Box::new(t))));
+                }
+                None => {
+                    return Err(ParseError::SyntaxError);
+                }
+            },
+            Some(Token::Quantifier(_, Some(_))) => {
+                return Err(ParseError::SyntaxError);
+            }
+            Some(token) => {
+                ts.push(token);
+            }
+            None => break,
+        }
+    }
+
+    ts.reverse();
+    let mut ts2: Vec<Token> = vec![];
+
+    for t in ts {
+        if t == Token::Or {
+            ts2.push(Token::AndGroup(section));
+            section = vec![];
+        } else {
+            section.push(t);
+        }
+    }
+    if section.len() != 0 {
+        if ts2.len() == 0 {
+            return Ok((Token::AndGroup(section), input));
+        }
+        ts2.push(Token::AndGroup(section));
+    }
+    return Ok((Token::OrGroup(ts2), input));
+}
+
+#[derive(Debug, PartialEq)]
+pub enum GenerateRandStringErrorType {
+    NotImplemented,
+    TokenError,
+    StatusError,
+}
+
+pub fn generate_rand_string(token: &Token) -> Result<String, GenerateRandStringErrorType> {
+    let mut v = Vec::<char>::new();
+    let mut rnd = rand::thread_rng();
+    generate_rand_string_private(token, &mut v, &mut rnd)?;
+    return Ok(String::from_iter(v));
+}
+
+fn generate_rand_string_private(
+    token: &Token,
+    v: &mut Vec<char>,
+    rng: &mut impl rand::Rng,
+) -> Result<(), GenerateRandStringErrorType> {
+    match token {
+        Token::Literal(string) => {
+            for c in string.chars() {
+                v.push(c)
+            }
+        }
+        Token::AndGroup(tokens) => {
+            for t in tokens {
+                generate_rand_string_private(t, v, rng)?;
+            }
+        }
+        Token::OrGroup(tokens) => {
+            let i = rng.gen_range(0..tokens.len());
+            generate_rand_string_private(&tokens[i], v, rng)?;
+        }
+        Token::Quantifier(range, token) => {
+            let s = *range.start();
+            let e = *range.end();
+            let i = rng.gen_range(s..=e);
+            for _ in 0..i {
+                match token {
+                    Some(t) => generate_rand_string_private(t, v, rng)?,
+                    _ => return Err(GenerateRandStringErrorType::TokenError),
+                };
+            }
+        }
+        Token::CharacterClass(mode, string) => match mode {
+            CharacterClassMode::Include => {
+                let i = rng.gen_range(0..string.chars().count());
+                match string.chars().nth(i) {
+                    Some(c) => v.push(c),
+                    _ => return Err(GenerateRandStringErrorType::StatusError),
+                }
+            }
+            CharacterClassMode::Exclude => return Err(GenerateRandStringErrorType::NotImplemented),
+        },
+        _ => return Err(GenerateRandStringErrorType::TokenError),
+    }
+
+    return Ok(());
+}
+
+#[test]
+fn test_generate_rand_string() {
+    assert_eq!(
+        Ok("ABC".to_string()),
+        generate_rand_string(&root("ABC").unwrap().0)
+    );
+
+    assert_eq!(
+        Ok("AAAAA".to_string()),
+        generate_rand_string(&root("A{5}").unwrap().0)
+    );
 }
