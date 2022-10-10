@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::ops::RangeInclusive;
 
 #[derive(Debug, PartialEq)]
@@ -6,7 +7,7 @@ pub enum Token {
     AndGroup(Vec<Token>),
     OrGroup(Vec<Token>),
     Quantifier(RangeInclusive<u32>, Option<Box<Token>>),
-    CharacterClass(CharacterClassMode, String),
+    CharacterClass(CharacterClassMode, Vec<CharacterRangeInclusive>),
     Or,
 }
 
@@ -24,6 +25,44 @@ pub enum ParseError {
     UnicodeRangeError,
     QuantifierOutOfLimit,
     InvalidRange,
+    CharacterClassRangeError,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Ord)]
+pub struct CharacterRangeInclusive {
+    start: u32,
+    end: u32,
+}
+
+impl std::cmp::PartialOrd for CharacterRangeInclusive {
+    fn partial_cmp(&self, other: &CharacterRangeInclusive) -> Option<Ordering> {
+        match self.start.partial_cmp(&other.start) {
+            Some(Ordering::Equal) => self.end.partial_cmp(&other.end),
+            result => result,
+        }
+    }
+}
+
+impl CharacterRangeInclusive {
+    pub fn new(start: u32, end: u32) -> CharacterRangeInclusive {
+        CharacterRangeInclusive { start, end }
+    }
+
+    pub fn contains(&self, item: u32) -> bool {
+        self.start <= item && item <= self.end
+    }
+
+    pub fn less_than(&self, other: &CharacterRangeInclusive) -> bool {
+        self.end < other.start
+    }
+
+    pub fn greater_than(&self, other: &CharacterRangeInclusive) -> bool {
+        other.end < self.start
+    }
+
+    pub fn count(&self) -> u32 {
+        self.end - self.start + 1
+    }
 }
 
 fn quantifier_max_value() -> u32 {
@@ -49,7 +88,7 @@ fn test_root() {
         Ok((
             Token::AndGroup(vec![Token::CharacterClass(
                 CharacterClassMode::Include,
-                "0123456789".to_string()
+                vec![CharacterRangeInclusive::new('0' as u32, '9' as u32)]
             )]),
             ""
         )),
@@ -162,6 +201,82 @@ fn test_quantifier() {
     );
 }
 
+#[test]
+fn test_normalize_character_range_inclusive() {
+    assert_eq!(
+        normalize_character_range_inclusive(vec![
+            CharacterRangeInclusive::new(0, 10),
+            CharacterRangeInclusive::new(0, 10),
+        ]),
+        vec![CharacterRangeInclusive::new(0, 10)]
+    );
+
+    assert_eq!(
+        normalize_character_range_inclusive(vec![
+            CharacterRangeInclusive::new(0, 10),
+            CharacterRangeInclusive::new(20, 30),
+        ]),
+        vec![
+            CharacterRangeInclusive::new(0, 10),
+            CharacterRangeInclusive::new(20, 30),
+        ]
+    );
+
+    assert_eq!(
+        normalize_character_range_inclusive(vec![
+            CharacterRangeInclusive::new(0, 10),
+            CharacterRangeInclusive::new(5, 20),
+        ]),
+        vec![CharacterRangeInclusive::new(0, 20),]
+    );
+
+    assert_eq!(
+        normalize_character_range_inclusive(vec![
+            CharacterRangeInclusive::new(0, 10),
+            CharacterRangeInclusive::new(1, 9),
+        ]),
+        vec![CharacterRangeInclusive::new(0, 10),]
+    );
+}
+
+fn normalize_character_range_inclusive(
+    mut ranges: Vec<CharacterRangeInclusive>,
+) -> Vec<CharacterRangeInclusive> {
+    ranges.sort();
+    ranges.into_iter().fold(vec![], |v, e| {
+        let mut new_ranges: Vec<CharacterRangeInclusive> = vec![];
+        let mut target: Option<CharacterRangeInclusive> = Some(e);
+        for r in v {
+            match target {
+                Some(t) => {
+                    if t.less_than(&r) {
+                        new_ranges.push(t);
+                        new_ranges.push(r);
+                        target = None;
+                    } else if !r.contains(t.start) && r.contains(t.end) {
+                        target = Some(CharacterRangeInclusive::new(t.start, r.end));
+                    } else if r.contains(t.start) && r.contains(t.end) {
+                        target = Some(r);
+                    } else if t.contains(r.start) && t.contains(r.end) {
+                        target = Some(t);
+                    } else if r.contains(t.start) && !r.contains(t.end) {
+                        target = Some(CharacterRangeInclusive::new(r.start, t.end));
+                    } else {
+                        new_ranges.push(r);
+                    }
+                }
+                None => {
+                    new_ranges.push(r);
+                }
+            };
+        }
+        if let Some(t) = target {
+            new_ranges.push(t);
+        }
+        return new_ranges;
+    })
+}
+
 fn character_class<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
     let mut target = input;
 
@@ -186,7 +301,7 @@ fn character_class<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
     let mut is_range = false;
     let mut is_escape = false;
 
-    let mut chars = vec![];
+    let mut ranges: Vec<CharacterRangeInclusive> = vec![];
     loop {
         match &it.next() {
             Some((_, '\\')) => {
@@ -196,7 +311,7 @@ fn character_class<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
                 }
 
                 if is_escape {
-                    chars.push('\\');
+                    ranges.push(CharacterRangeInclusive::new('\\' as u32, '\\' as u32));
                     is_escape = false;
                 } else {
                     is_escape = true;
@@ -204,7 +319,7 @@ fn character_class<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
             }
             Some((_, '-')) => {
                 if is_escape {
-                    chars.push('-');
+                    ranges.push(CharacterRangeInclusive::new('-' as u32, '-' as u32));
                     is_escape = false;
                 } else {
                     is_range = true;
@@ -212,7 +327,7 @@ fn character_class<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
             }
             Some((_, ']')) => {
                 if is_escape {
-                    chars.push(']');
+                    ranges.push(CharacterRangeInclusive::new(']' as u32, ']' as u32));
                     is_escape = false;
                     continue;
                 }
@@ -225,16 +340,15 @@ fn character_class<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
             Some((_, c)) => {
                 if is_range {
                     is_range = false;
-                    for p in ((prev as u32) + 1)..((*c as u32) + 1) {
-                        chars.push(char::from_u32(p).ok_or(ParseError::UnicodeRangeError)?);
-                    }
+                    ranges.push(CharacterRangeInclusive::new(prev as u32, *c as u32));
                     prev = *c;
                     continue;
                 } else if is_escape {
                     is_escape = false;
-                    chars.push('\\');
+                    ranges.push(CharacterRangeInclusive::new('\\' as u32, '\\' as u32));
                 }
-                chars.push(*c);
+
+                ranges.push(CharacterRangeInclusive::new(*c as u32, *c as u32));
                 prev = *c;
             }
             _ => {
@@ -243,7 +357,7 @@ fn character_class<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
         }
     }
 
-    let token = Token::CharacterClass(mode, String::from_iter(chars));
+    let token = Token::CharacterClass(mode, normalize_character_range_inclusive(ranges));
     return match &it.next() {
         Some((i, _)) => Ok((
             token,
@@ -257,7 +371,10 @@ fn character_class<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
 fn test_character_class() {
     assert_eq!(
         Ok((
-            Token::CharacterClass(CharacterClassMode::Include, "abc".to_string()),
+            Token::CharacterClass(
+                CharacterClassMode::Include,
+                vec![CharacterRangeInclusive::new('a' as u32, 'c' as u32)]
+            ),
             ""
         )),
         character_class("[a-c]")
@@ -265,7 +382,10 @@ fn test_character_class() {
 
     assert_eq!(
         Ok((
-            Token::CharacterClass(CharacterClassMode::Exclude, "abc".to_string()),
+            Token::CharacterClass(
+                CharacterClassMode::Exclude,
+                vec![CharacterRangeInclusive::new('a' as u32, 'c' as u32)]
+            ),
             ""
         )),
         character_class("[^a-c]")
@@ -273,7 +393,10 @@ fn test_character_class() {
 
     assert_eq!(
         Ok((
-            Token::CharacterClass(CharacterClassMode::Include, "]".to_string()),
+            Token::CharacterClass(
+                CharacterClassMode::Include,
+                vec![CharacterRangeInclusive::new(']' as u32, ']' as u32)]
+            ),
             ""
         )),
         character_class("[\\]]")
@@ -281,7 +404,13 @@ fn test_character_class() {
 
     assert_eq!(
         Ok((
-            Token::CharacterClass(CharacterClassMode::Include, "\\ ".to_string()),
+            Token::CharacterClass(
+                CharacterClassMode::Include,
+                vec![
+                    CharacterRangeInclusive::new(' ' as u32, ' ' as u32),
+                    CharacterRangeInclusive::new('\\' as u32, '\\' as u32),
+                ]
+            ),
             ""
         )),
         character_class("[\\ ]")
@@ -390,17 +519,85 @@ fn test_vertical_line() {
 }
 
 fn metacharacter<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
-    let word = "\\d";
-    if !input.starts_with(word) {
-        return Err(ParseError::Skip);
-    }
+    let characters = [
+        (
+            "\\d",
+            Token::CharacterClass(
+                CharacterClassMode::Include,
+                vec![CharacterRangeInclusive::new('0' as u32, '9' as u32)],
+            ),
+        ),
+        (
+            "\\D",
+            Token::CharacterClass(
+                CharacterClassMode::Exclude,
+                vec![CharacterRangeInclusive::new('0' as u32, '9' as u32)],
+            ),
+        ),
+        (
+            "\\s",
+            Token::CharacterClass(
+                CharacterClassMode::Include,
+                vec![
+                    CharacterRangeInclusive::new(' ' as u32, ' ' as u32),
+                    CharacterRangeInclusive::new('\t' as u32, '\t' as u32),
+                    CharacterRangeInclusive::new('\n' as u32, '\n' as u32),
+                    CharacterRangeInclusive::new('\r' as u32, '\r' as u32),
+                ],
+            ),
+        ),
+        (
+            "\\S",
+            Token::CharacterClass(
+                CharacterClassMode::Exclude,
+                vec![
+                    CharacterRangeInclusive::new(' ' as u32, ' ' as u32),
+                    CharacterRangeInclusive::new('\t' as u32, '\t' as u32),
+                    CharacterRangeInclusive::new('\n' as u32, '\n' as u32),
+                    CharacterRangeInclusive::new('\r' as u32, '\r' as u32),
+                ],
+            ),
+        ),
+        (
+            "\\w",
+            Token::CharacterClass(
+                CharacterClassMode::Include,
+                vec![
+                    CharacterRangeInclusive::new('0' as u32, '9' as u32),
+                    CharacterRangeInclusive::new('A' as u32, 'Z' as u32),
+                    CharacterRangeInclusive::new('a' as u32, 'z' as u32),
+                    CharacterRangeInclusive::new('_' as u32, '_' as u32),
+                ],
+            ),
+        ),
+        (
+            "\\W",
+            Token::CharacterClass(
+                CharacterClassMode::Exclude,
+                vec![
+                    CharacterRangeInclusive::new('0' as u32, '9' as u32),
+                    CharacterRangeInclusive::new('A' as u32, 'Z' as u32),
+                    CharacterRangeInclusive::new('a' as u32, 'z' as u32),
+                    CharacterRangeInclusive::new('_' as u32, '_' as u32),
+                ],
+            ),
+        ),
+    ];
 
-    Ok((
-        Token::CharacterClass(CharacterClassMode::Include, "0123456789".to_string()),
-        input
-            .get(word.len()..input.len())
-            .ok_or(ParseError::RangeError)?,
-    ))
+    for c in characters {
+        let word = c.0;
+        if !input.starts_with(word) {
+            continue;
+        }
+
+        return Ok((
+            c.1,
+            input
+                .get(word.len()..input.len())
+                .ok_or(ParseError::RangeError)?,
+        ));
+    }
+    Err(ParseError::Skip)
 }
 
 fn literal<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
@@ -618,12 +815,34 @@ fn generate_rand_string_private(
                 };
             }
         }
-        Token::CharacterClass(mode, string) => match mode {
+        Token::CharacterClass(mode, ranges) => match mode {
             CharacterClassMode::Include => {
-                let i = rng.gen_range(0..string.chars().count());
-                match string.chars().nth(i) {
-                    Some(c) => v.push(c),
-                    _ => return Err(GenerateRandStringErrorType::StatusError),
+                let count = ranges.iter().fold(0, |sum, range| sum + range.count());
+                let i = rng.gen_range(0..count);
+
+                let result = ranges
+                    .iter()
+                    .fold((i, None), |(c, result), range| match result {
+                        None => {
+                            if range.count() < c {
+                                return (0, Some(range.start + c - range.count()));
+                            }
+                            return (c - range.count(), None);
+                        }
+                        Some(code) => {
+                            return (c, Some(code));
+                        }
+                    });
+                match result {
+                    (_, Some(code)) => match char::from_u32(code) {
+                        Some(c) => v.push(c),
+                        _ => {
+                            return Err(GenerateRandStringErrorType::StatusError);
+                        }
+                    },
+                    _ => {
+                        return Err(GenerateRandStringErrorType::StatusError);
+                    }
                 }
             }
             CharacterClassMode::Exclude => return Err(GenerateRandStringErrorType::NotImplemented),
