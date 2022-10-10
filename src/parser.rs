@@ -9,6 +9,7 @@ pub enum Token {
     Quantifier(RangeInclusive<u32>, Option<Box<Token>>),
     CharacterClass(CharacterClassMode, Vec<CharacterRangeInclusive>),
     Or,
+    None,
 }
 
 #[derive(Debug, PartialEq)]
@@ -25,6 +26,7 @@ pub enum ParseError {
     UnicodeRangeError,
     QuantifierOutOfLimit,
     InvalidRange,
+    EmptyCharacterClass,
     CharacterClassRangeError,
 }
 
@@ -105,9 +107,7 @@ fn quantifier<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
         return Err(ParseError::SyntaxError);
     }
 
-    target = target
-        .get("{".len()..target.len())
-        .ok_or(ParseError::RangeError)?;
+    (_, target) = tag("{")(target)?;
 
     let start = if let Some(i) = target.find(|c: char| !c.is_digit(10)) {
         if i == 0 {
@@ -129,9 +129,7 @@ fn quantifier<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
     let end = if target.starts_with("}") {
         start
     } else if target.starts_with(",") {
-        target = target
-            .get(",".len()..target.len())
-            .ok_or(ParseError::RangeError)?;
+        (_, target) = tag(",")(target)?;
 
         if let Some(i) = target.find(|c: char| !c.is_digit(10)) {
             if i == 0 {
@@ -160,13 +158,7 @@ fn quantifier<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
         return Err(ParseError::InvalidRange);
     }
 
-    if !target.starts_with("}") {
-        return Err(ParseError::SyntaxError);
-    }
-
-    target = target
-        .get("}".len()..target.len())
-        .ok_or(ParseError::RangeError)?;
+    (_, target) = tag("}")(target)?;
 
     return Ok((Token::Quantifier(start..=end, None), target));
 }
@@ -280,17 +272,15 @@ fn normalize_character_range_inclusive(
 fn character_class<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
     let mut target = input;
 
-    let bracket_not = "[^";
-    let bracket = "[";
-    let mode = if input.starts_with(bracket_not) {
-        target = target
-            .get(bracket_not.len()..target.len())
-            .ok_or(ParseError::RangeError)?;
+    if input.starts_with("[]") {
+        return Err(ParseError::EmptyCharacterClass);
+    }
+
+    let mode = if input.starts_with("[^") {
+        (_, target) = tag("[^")(target)?;
         CharacterClassMode::Exclude
-    } else if target.starts_with(bracket) {
-        target = target
-            .get(bracket.len()..target.len())
-            .ok_or(ParseError::RangeError)?;
+    } else if target.starts_with("[") {
+        (_, target) = tag("[")(target)?;
         CharacterClassMode::Include
     } else {
         return Err(ParseError::Skip);
@@ -433,17 +423,7 @@ fn alt<'a>(
 }
 
 fn asterisk<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
-    let word = "*";
-    if !input.starts_with(word) {
-        return Err(ParseError::Skip);
-    }
-
-    Ok((
-        Token::Quantifier(0..=quantifier_max_value(), None),
-        input
-            .get(word.len()..input.len())
-            .ok_or(ParseError::RangeError)?,
-    ))
+    keyword("*", || Token::Quantifier(0..=quantifier_max_value(), None))(input)
 }
 
 #[test]
@@ -456,17 +436,7 @@ fn test_asterisk() {
 }
 
 fn plus<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
-    let word = "+";
-    if !input.starts_with(word) {
-        return Err(ParseError::Skip);
-    }
-
-    Ok((
-        Token::Quantifier(1..=quantifier_max_value(), None),
-        input
-            .get(word.len()..input.len())
-            .ok_or(ParseError::RangeError)?,
-    ))
+    keyword("+", || Token::Quantifier(1..=quantifier_max_value(), None))(input)
 }
 
 #[test]
@@ -479,17 +449,7 @@ fn test_plus() {
 }
 
 fn question<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
-    let word = "?";
-    if !input.starts_with(word) {
-        return Err(ParseError::Skip);
-    }
-
-    Ok((
-        Token::Quantifier(0..=1, None),
-        input
-            .get(word.len()..input.len())
-            .ok_or(ParseError::RangeError)?,
-    ))
+    keyword("?", || Token::Quantifier(0..=1, None))(input)
 }
 
 #[test]
@@ -499,17 +459,40 @@ fn test_question() {
 }
 
 fn vertical_line<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
-    let word = "|";
-    if !input.starts_with(word) {
-        return Err(ParseError::Skip);
-    }
+    keyword("|", || Token::Or)(input)
+}
 
-    Ok((
-        Token::Or,
-        input
-            .get(word.len()..input.len())
-            .ok_or(ParseError::RangeError)?,
-    ))
+fn keyword(
+    keyword: &'static str,
+    supplier: fn() -> Token,
+) -> impl Fn(&str) -> Result<(Token, &str), ParseError> {
+    move |input| {
+        if !input.starts_with(keyword) {
+            return Err(ParseError::Skip);
+        }
+
+        Ok((
+            supplier(),
+            input
+                .get(keyword.len()..input.len())
+                .ok_or(ParseError::RangeError)?,
+        ))
+    }
+}
+
+fn tag(word: &'static str) -> impl Fn(&str) -> Result<(Token, &str), ParseError> {
+    move |input| {
+        if !input.starts_with(word) {
+            return Err(ParseError::SyntaxError);
+        }
+
+        Ok((
+            Token::None,
+            input
+                .get(word.len()..input.len())
+                .ok_or(ParseError::RangeError)?,
+        ))
+    }
 }
 
 #[test]
@@ -519,23 +502,20 @@ fn test_vertical_line() {
 }
 
 fn metacharacter<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
-    let characters = [
-        (
-            "\\d",
+    let parsers = [
+        keyword("\\d", || {
             Token::CharacterClass(
                 CharacterClassMode::Include,
                 vec![CharacterRangeInclusive::new('0' as u32, '9' as u32)],
-            ),
-        ),
-        (
-            "\\D",
+            )
+        }),
+        keyword("\\D", || {
             Token::CharacterClass(
                 CharacterClassMode::Exclude,
                 vec![CharacterRangeInclusive::new('0' as u32, '9' as u32)],
-            ),
-        ),
-        (
-            "\\s",
+            )
+        }),
+        keyword("\\s", || {
             Token::CharacterClass(
                 CharacterClassMode::Include,
                 vec![
@@ -544,10 +524,9 @@ fn metacharacter<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
                     CharacterRangeInclusive::new('\n' as u32, '\n' as u32),
                     CharacterRangeInclusive::new('\r' as u32, '\r' as u32),
                 ],
-            ),
-        ),
-        (
-            "\\S",
+            )
+        }),
+        keyword("\\S", || {
             Token::CharacterClass(
                 CharacterClassMode::Exclude,
                 vec![
@@ -556,10 +535,9 @@ fn metacharacter<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
                     CharacterRangeInclusive::new('\n' as u32, '\n' as u32),
                     CharacterRangeInclusive::new('\r' as u32, '\r' as u32),
                 ],
-            ),
-        ),
-        (
-            "\\w",
+            )
+        }),
+        keyword("\\w", || {
             Token::CharacterClass(
                 CharacterClassMode::Include,
                 vec![
@@ -568,10 +546,9 @@ fn metacharacter<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
                     CharacterRangeInclusive::new('a' as u32, 'z' as u32),
                     CharacterRangeInclusive::new('_' as u32, '_' as u32),
                 ],
-            ),
-        ),
-        (
-            "\\W",
+            )
+        }),
+        keyword("\\W", || {
             Token::CharacterClass(
                 CharacterClassMode::Exclude,
                 vec![
@@ -580,23 +557,18 @@ fn metacharacter<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
                     CharacterRangeInclusive::new('a' as u32, 'z' as u32),
                     CharacterRangeInclusive::new('_' as u32, '_' as u32),
                 ],
-            ),
-        ),
+            )
+        }),
     ];
 
-    for c in characters {
-        let word = c.0;
-        if !input.starts_with(word) {
-            continue;
+    for parser in parsers {
+        match parser(input) {
+            Ok((token, next)) => return Ok((token, next)),
+            Err(ParseError::Skip) => continue,
+            Err(err) => return Err(err),
         }
-
-        return Ok((
-            c.1,
-            input
-                .get(word.len()..input.len())
-                .ok_or(ParseError::RangeError)?,
-        ));
     }
+
     Err(ParseError::Skip)
 }
 
@@ -667,21 +639,18 @@ pub fn root<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
 }
 
 fn group<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
+    let mut target = input;
+
     if !input.starts_with("(") {
         return Err(ParseError::Skip);
     }
-
     let mut tokens: Vec<Token> = vec![];
-    let mut target = input
-        .get("(".len()..input.len())
-        .ok_or(ParseError::RangeError)?;
+
+    (_, target) = tag("(")(target)?;
 
     loop {
         if target.starts_with(")") {
-            target = target
-                .get(")".len()..target.len())
-                .ok_or(ParseError::RangeError)?;
-
+            (_, target) = tag(")")(target)?;
             return create_group_token(target, tokens);
         }
 
