@@ -103,13 +103,11 @@ fn test_root() {
 fn quantifier<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
     let mut target = input;
 
-    if !target.starts_with("{") {
-        return Err(ParseError::Skip);
-    } else if target.starts_with("{}") {
+    (_, target) = tag("{")(target)?;
+
+    if target.starts_with("}") {
         return Err(ParseError::SyntaxError);
     }
-
-    (_, target) = tag("{")(target)?;
 
     let start = match digit(target) {
         Ok((Token::Number(num), t)) => {
@@ -125,35 +123,39 @@ fn quantifier<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
         }
     };
 
-    let end = if target.starts_with("}") {
-        start
-    } else if target.starts_with(",") {
-        (_, target) = tag(",")(target)?;
-        match digit(target) {
-            Ok((Token::Number(num), t)) => {
-                target = t;
-                num
-            }
-            Ok(_) => {
-                return Err(ParseError::SyntaxError);
-            }
-            Err(ParseError::NotMatch) => quantifier_max_value(),
-            Err(err) => {
-                return Err(err);
-            }
+    if quantifier_max_value() < start {
+        return Err(ParseError::QuantifierOutOfLimit);
+    }
+
+    if let Ok((_, t)) = tag("}")(target) {
+        target = t;
+        return Ok((Token::Quantifier(start..=start, None), target));
+    }
+
+    (_, target) = must(tag(","))(target)?;
+
+    let end = match digit(target) {
+        Ok((Token::Number(num), t)) => {
+            target = t;
+            num
         }
-    } else {
-        return Err(ParseError::SyntaxError);
+        Ok(_) => {
+            return Err(ParseError::SyntaxError);
+        }
+        Err(ParseError::NotMatch) => quantifier_max_value(),
+        Err(err) => {
+            return Err(err);
+        }
     };
 
-    if quantifier_max_value() < start || quantifier_max_value() < end {
+    if quantifier_max_value() < end {
         return Err(ParseError::QuantifierOutOfLimit);
     }
     if end < start {
         return Err(ParseError::InvalidRange);
     }
 
-    (_, target) = tag("}")(target)?;
+    (_, target) = must(tag("}"))(target)?;
 
     return Ok((Token::Quantifier(start..=end, None), target));
 }
@@ -271,14 +273,14 @@ fn character_class<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
         return Err(ParseError::EmptyCharacterClass);
     }
 
-    let mode = if input.starts_with("[^") {
-        (_, target) = tag("[^")(target)?;
+    let mode = if let Ok((_, t)) = tag("[^")(target) {
+        target = t;
         CharacterClassMode::Exclude
-    } else if target.starts_with("[") {
-        (_, target) = tag("[")(target)?;
+    } else if let Ok((_, t)) = tag("[")(target) {
+        target = t;
         CharacterClassMode::Include
     } else {
-        return Err(ParseError::Skip);
+        return Err(ParseError::NotMatch);
     };
 
     let it = &mut target.char_indices();
@@ -410,6 +412,7 @@ fn alt<'a>(
         match parser(input) {
             Ok((token, next)) => return Ok((token, next)),
             Err(ParseError::Skip) => continue,
+            Err(ParseError::NotMatch) => continue,
             Err(err) => return Err(err),
         }
     }
@@ -475,10 +478,30 @@ fn keyword(
     }
 }
 
+fn must(
+    parser: impl Fn(&str) -> Result<(Token, &str), ParseError>,
+) -> impl Fn(&str) -> Result<(Token, &str), ParseError> {
+    move |input| {
+        parser(input).map_err(|err| {
+            if err == ParseError::NotMatch {
+                ParseError::SyntaxError
+            } else {
+                err
+            }
+        })
+    }
+}
+
+#[test]
+fn test_must() {
+    assert_eq!(Ok((Token::Number(123), "")), must(digit)("123"));
+    assert_eq!(Err(ParseError::SyntaxError), must(digit)("abc"));
+}
+
 fn tag(word: &'static str) -> impl Fn(&str) -> Result<(Token, &str), ParseError> {
     move |input| {
         if !input.starts_with(word) {
-            return Err(ParseError::SyntaxError);
+            return Err(ParseError::NotMatch);
         }
 
         Ok((
@@ -669,16 +692,12 @@ pub fn root<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
 fn group<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
     let mut target = input;
 
-    if !input.starts_with("(") {
-        return Err(ParseError::Skip);
-    }
+    (_, target) = tag("(")(target)?;
     let mut tokens: Vec<Token> = vec![];
 
-    (_, target) = tag("(")(target)?;
-
     loop {
-        if target.starts_with(")") {
-            (_, target) = tag(")")(target)?;
+        if let Ok((_, t)) = tag(")")(target) {
+            target = t;
             return create_group_token(target, tokens);
         }
 
