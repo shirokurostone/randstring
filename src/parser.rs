@@ -10,6 +10,7 @@ pub enum Token {
     CharacterClass(CharacterClassMode, Vec<CharacterRangeInclusive>),
     Or,
     None,
+    Number(u32),
 }
 
 #[derive(Debug, PartialEq)]
@@ -28,6 +29,7 @@ pub enum ParseError {
     InvalidRange,
     EmptyCharacterClass,
     CharacterClassRangeError,
+    NotMatch,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Ord)]
@@ -109,43 +111,36 @@ fn quantifier<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
 
     (_, target) = tag("{")(target)?;
 
-    let start = if let Some(i) = target.find(|c: char| !c.is_digit(10)) {
-        if i == 0 {
-            0
-        } else {
-            let num = target
-                .get(0..i)
-                .ok_or(ParseError::RangeError)?
-                .to_string()
-                .parse::<u32>()
-                .map_err(|_| ParseError::SyntaxError)?;
-            target = target.get(i..).ok_or(ParseError::RangeError)?;
+    let start = match digit(target) {
+        Ok((Token::Number(num), t)) => {
+            target = t;
             num
         }
-    } else {
-        0u32
+        Ok(_) => {
+            return Err(ParseError::SyntaxError);
+        }
+        Err(ParseError::Skip) => 0u32,
+        Err(err) => {
+            return Err(err);
+        }
     };
 
     let end = if target.starts_with("}") {
         start
     } else if target.starts_with(",") {
         (_, target) = tag(",")(target)?;
-
-        if let Some(i) = target.find(|c: char| !c.is_digit(10)) {
-            if i == 0 {
-                quantifier_max_value()
-            } else {
-                let num = target
-                    .get(0..i)
-                    .ok_or(ParseError::RangeError)?
-                    .to_string()
-                    .parse::<u32>()
-                    .map_err(|_| ParseError::SyntaxError)?;
-                target = target.get(i..).ok_or(ParseError::RangeError)?;
+        match digit(target) {
+            Ok((Token::Number(num), t)) => {
+                target = t;
                 num
             }
-        } else {
-            quantifier_max_value()
+            Ok(_) => {
+                return Err(ParseError::SyntaxError);
+            }
+            Err(ParseError::Skip) => quantifier_max_value(),
+            Err(err) => {
+                return Err(err);
+            }
         }
     } else {
         return Err(ParseError::SyntaxError);
@@ -493,6 +488,39 @@ fn tag(word: &'static str) -> impl Fn(&str) -> Result<(Token, &str), ParseError>
                 .ok_or(ParseError::RangeError)?,
         ))
     }
+}
+
+fn digit<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
+    let mut target = input;
+
+    if target.len() == 0 {
+        return Err(ParseError::NotMatch);
+    }
+
+    match target
+        .find(|c: char| !c.is_digit(10))
+        .unwrap_or(target.len())
+    {
+        0 => Err(ParseError::Skip),
+        i => {
+            let num = target
+                .get(0..i)
+                .ok_or(ParseError::RangeError)?
+                .to_string()
+                .parse::<u32>()
+                .map_err(|_| ParseError::SyntaxError)?;
+            target = target.get(i..).ok_or(ParseError::RangeError)?;
+            Ok((Token::Number(num), target))
+        }
+    }
+}
+
+#[test]
+fn test_digit() {
+    assert_eq!(Ok((Token::Number(123), "")), digit("123"));
+    assert_eq!(Ok((Token::Number(123), "abc")), digit("123abc"));
+    assert_eq!(Err(ParseError::NotMatch), digit(""));
+    assert_eq!(Err(ParseError::Skip), digit("abc"));
 }
 
 #[test]
