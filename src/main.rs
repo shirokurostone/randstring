@@ -17,7 +17,7 @@ fn main() {
 
     let regexp = cli.regexp;
 
-    let status = match root(&regexp){
+    let status = match root(&regexp) {
         Ok((token, _)) => match generate_rand_string(&token) {
             Ok(string) => {
                 print!("{}", string);

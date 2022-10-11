@@ -119,7 +119,7 @@ fn quantifier<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
         Ok(_) => {
             return Err(ParseError::SyntaxError);
         }
-        Err(ParseError::Skip) => 0u32,
+        Err(ParseError::NotMatch) => 0u32,
         Err(err) => {
             return Err(err);
         }
@@ -137,7 +137,7 @@ fn quantifier<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
             Ok(_) => {
                 return Err(ParseError::SyntaxError);
             }
-            Err(ParseError::Skip) => quantifier_max_value(),
+            Err(ParseError::NotMatch) => quantifier_max_value(),
             Err(err) => {
                 return Err(err);
             }
@@ -501,7 +501,7 @@ fn digit<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
         .find(|c: char| !c.is_digit(10))
         .unwrap_or(target.len())
     {
-        0 => Err(ParseError::Skip),
+        0 => Err(ParseError::NotMatch),
         i => {
             let num = target
                 .get(0..i)
@@ -520,7 +520,7 @@ fn test_digit() {
     assert_eq!(Ok((Token::Number(123), "")), digit("123"));
     assert_eq!(Ok((Token::Number(123), "abc")), digit("123abc"));
     assert_eq!(Err(ParseError::NotMatch), digit(""));
-    assert_eq!(Err(ParseError::Skip), digit("abc"));
+    assert_eq!(Err(ParseError::NotMatch), digit("abc"));
 }
 
 #[test]
