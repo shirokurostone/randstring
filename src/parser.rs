@@ -105,7 +105,7 @@ fn quantifier<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
 
     (_, target) = tag("{")(target)?;
 
-    if target.starts_with("}") {
+    if let Ok(_) = tag("}")(target) {
         return Err(ParseError::SyntaxError);
     }
 
@@ -269,7 +269,7 @@ fn normalize_character_range_inclusive(
 fn character_class<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
     let mut target = input;
 
-    if input.starts_with("[]") {
+    if let Ok(_) = tag("[]")(target) {
         return Err(ParseError::EmptyCharacterClass);
     }
 
@@ -652,7 +652,7 @@ pub fn root<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
     let mut target = input;
 
     loop {
-        if target.starts_with(")") {
+        if let Ok(_) = tag(")")(target) {
             return Err(ParseError::SyntaxError);
         }
 
