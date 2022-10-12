@@ -21,7 +21,6 @@ pub enum CharacterClassMode {
 
 #[derive(Debug, PartialEq)]
 pub enum ParseError {
-    Skip,
     RangeError,
     SyntaxError,
     UnicodeRangeError,
@@ -411,13 +410,11 @@ fn alt<'a>(
     for parser in parsers {
         match parser(input) {
             Ok((token, next)) => return Ok((token, next)),
-            Err(ParseError::Skip) => continue,
             Err(ParseError::NotMatch) => continue,
             Err(err) => return Err(err),
         }
     }
-
-    Err(ParseError::Skip)
+    Err(ParseError::NotMatch)
 }
 
 fn asterisk<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
@@ -430,7 +427,7 @@ fn test_asterisk() {
         Ok((Token::Quantifier(0..=quantifier_max_value(), None), "")),
         asterisk("*")
     );
-    assert_eq!(Err(ParseError::Skip), asterisk("_"));
+    assert_eq!(Err(ParseError::NotMatch), asterisk("_"));
 }
 
 fn plus<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
@@ -443,7 +440,7 @@ fn test_plus() {
         Ok((Token::Quantifier(1..=quantifier_max_value(), None), "")),
         plus("+")
     );
-    assert_eq!(Err(ParseError::Skip), plus("_"));
+    assert_eq!(Err(ParseError::NotMatch), plus("_"));
 }
 
 fn question<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
@@ -453,7 +450,7 @@ fn question<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
 #[test]
 fn test_question() {
     assert_eq!(Ok((Token::Quantifier(0..=1, None), "")), question("?"));
-    assert_eq!(Err(ParseError::Skip), question("_"));
+    assert_eq!(Err(ParseError::NotMatch), question("_"));
 }
 
 fn vertical_line<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
@@ -466,7 +463,7 @@ fn keyword(
 ) -> impl Fn(&str) -> Result<(Token, &str), ParseError> {
     move |input| {
         if !input.starts_with(keyword) {
-            return Err(ParseError::Skip);
+            return Err(ParseError::NotMatch);
         }
 
         Ok((
@@ -549,7 +546,7 @@ fn test_digit() {
 #[test]
 fn test_vertical_line() {
     assert_eq!(Ok((Token::Or, "")), vertical_line("|"));
-    assert_eq!(Err(ParseError::Skip), vertical_line("_"));
+    assert_eq!(Err(ParseError::NotMatch), vertical_line("_"));
 }
 
 fn metacharacter<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
@@ -615,12 +612,12 @@ fn metacharacter<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
     for parser in parsers {
         match parser(input) {
             Ok((token, next)) => return Ok((token, next)),
-            Err(ParseError::Skip) => continue,
+            Err(ParseError::NotMatch) => continue,
             Err(err) => return Err(err),
         }
     }
 
-    Err(ParseError::Skip)
+    Err(ParseError::NotMatch)
 }
 
 fn literal<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
@@ -637,7 +634,7 @@ fn literal<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
                 input.get(0..0).ok_or(ParseError::RangeError)?,
             )),
         },
-        _ => Err(ParseError::Skip),
+        _ => Err(ParseError::NotMatch),
     };
 }
 
@@ -679,7 +676,7 @@ pub fn root<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
                 target = next;
                 continue;
             }
-            Err(ParseError::Skip) => {}
+            Err(ParseError::NotMatch) => {}
             Err(err) => {
                 return Err(err);
             }
@@ -724,7 +721,7 @@ fn group<'a>(input: &'a str) -> Result<(Token, &'a str), ParseError> {
                 target = next;
                 continue;
             }
-            Err(ParseError::Skip) => {}
+            Err(ParseError::NotMatch) => {}
             Err(err) => {
                 return Err(err);
             }
